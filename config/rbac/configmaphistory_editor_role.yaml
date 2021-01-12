@@ -1,0 +1,24 @@
+# permissions for end users to edit configmaphistories.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: configmaphistory-editor-role
+rules:
+- apiGroups:
+  - test.opskumu.com
+  resources:
+  - configmaphistories
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - test.opskumu.com
+  resources:
+  - configmaphistories/status
+  verbs:
+  - get

@@ -1,0 +1,8 @@
+domain: opskumu.com
+multigroup: true
+repo: github.com/opskumu/crd-example
+resources:
+- group: test
+  kind: ConfigMapHistory
+  version: v1
+version: "2"

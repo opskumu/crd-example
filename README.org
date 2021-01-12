@@ -1,0 +1,297 @@
+* 自定义 Kubernetes CRD
+
+** 理论概要
+
+我们知道 Kubernetes 提供 CRD 机制用以扩展资源，在某些场景下我们可以利用 CRD 扩展通过 Kubernetes 存储资源，也就是把 Kubernetes 当作存储来使用。按照官方的说法 CRD + Controller = Operator，[[https://github.com/kubernetes-sigs/kubebuilder][kubebuilder ]]可以生成这样的代码框架，并且可自定义选择是否生成 Controller。client 相关代码则可以通过 [[https://github.com/kubernetes/code-generator][code-generator]] 生成，生成 informer、lister、clientset 等系列代码。通过这种方式，我们只需要在生成的代码中填充业务代码，而无需关心框架之外的代码，这样可以极大的提升开发效率和降低 CRD 的上手门槛。本文通过引入 ConfigMapHistory 这个 CRD 为例，带你从零到一构建和部署 CRD。
+
+** kubebuilder 安装
+
+kubebuilder 安装文档可以参考官档 [[https://book.kubebuilder.io/quick-start.html#installation][Install kubebuilder]] ：
+
+#+BEGIN_SRC bash
+os=$(go env GOOS)
+arch=$(go env GOARCH)
+
+# download kubebuilder and extract it to tmp
+curl -L https://go.kubebuilder.io/dl/2.3.1/${os}/${arch} | tar -xz -C /tmp/
+
+# move to a long-term location and put it on your path
+# (you'll need to set the KUBEBUILDER_ASSETS env var if you put it somewhere else)
+sudo mv /tmp/kubebuilder_2.3.1_${os}_${arch} /usr/local/kubebuilder
+export PATH=$PATH:/usr/local/kubebuilder/bin
+#+END_SRC
+
+** kubebuilder 初始化
+
+kubebuilder 代码初始化：
+
+#+BEGIN_SRC bash 
+# github.com/opskumu 以实际仓库为主，本实例为 crd-example
+mkdir -p $GOPATH/src/github.com/opskumu/crd-example
+cd $GOPATH/src/github.com/opskumu/crd-example
+# 域名以实际域名为主，本实例为 opskumu.com
+kubebuilder init --domain opskumu.com
+kubebuilder edit --multigroup=true
+#+END_SRC
+
+查看当前生成代码的目录结构：
+
+#+BEGIN_SRC bash 
+# tree -L 2 ./
+.
+├── Dockerfile
+├── Makefile
+├── PROJECT
+├── bin
+│   └── manager
+├── config
+│   ├── certmanager
+│   ├── default
+│   ├── manager
+│   ├── prometheus
+│   ├── rbac
+│   └── webhook
+├── go.mod
+├── go.sum
+├── hack
+│   └── boilerplate.go.txt
+└── main.go
+#+END_SRC
+
+** kubebuilder 创建 API
+
+#+BEGIN_SRC bash 
+# kubebuilder create api --group test --version v1 --kind ConfigMapHistory
+Create Resource [y/n]    # 创建 ConfigMapHistory 资源，此处选择 y
+y
+Create Controller [y/n]  # 创建控制器，此处不需要，选择 n
+n
+# tree apis/test/v1   # apis 目录存放 group test v1 相关的资源 API
+apis/test/v1
+├── configmaphistory_types.go
+├── groupversion_info.go
+└── zz_generated.deepcopy.go
+#+END_SRC
+
+** 自定义代码并生成 client 代码
+
+默认生成 =apis/test/v1/configmaphistory_types.go= 代码如下：
+
+#+BEGIN_SRC go 
+......
+// +kubebuilder:object:root=true
+
+// ConfigMapHistory is the Schema for the configmaphistories API
+type ConfigMapHistory struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    Spec   ConfigMapHistorySpec   `json:"spec,omitempty"`
+    Status ConfigMapHistoryStatus `json:"status,omitempty"`
+}
+......
+#+END_SRC
+
+我们创建 ConfigMapHistory 类型的资源的目的是存放 ConfigMap 的历史记录，所以需要针对以上代码做一些修改：
+
+#+BEGIN_SRC 
+......
+// +genclient
+// +kubebuilder:object:root=true
+
+// ConfigMapHistory is the Schema for the configmaphistories API
+type ConfigMapHistory struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    ConfigMap  string            `json:"configMap"`                // 关联 ConfigMap 名
+    Data       map[string]string `json:"data,omitempty"`           // 对应 ConfigMap 版本数据
+    BinaryData map[string]byte   `json:"binaryData,omitempty"`     // 对应 ConfigMap 版本二进制数据
+}
+......
+#+END_SRC
+
+注意 =// +genclient= 是额外添加的，为后续 =code-generator= 生成 client 代码打标签。types 文件修改之后，可以执行 =make manifests= 指令生成 CRD 文件：
+
+#+BEGIN_SRC bash 
+# make manifests
+# ls config/crd/bases
+test.opskumu.com_configmaphistories.yaml
+#+END_SRC
+
+如果代码结构变更，需要再次执行 =make manifest= 以生成新的 CRD 文件。
+
+创建 =apis/test/v1/doc.go= 、 =apis/test/v1/register.go= 、 =hack/tools.go= 和 =hack/update-codegen.sh= 文件
+
++ apis/test/v1/doc.go
+
+#+BEGIN_SRC go 
+/*
+Copyright 2017 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// +k8s:deepcopy-gen=package
+// 注意 groupName 和实际相同
+// +groupName=test.opskumu.com
+
+// Package v1 is the v1 version of the API.
+package v1
+#+END_SRC
+
++ apis/test/v1/register.go
+
+#+BEGIN_SRC go
+/*
+Copyright 2017 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1
+
+import (
+    "k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+// SchemeGroupVersion is group version used to register these objects.
+var SchemeGroupVersion = GroupVersion
+
+func Resource(resource string) schema.GroupResource {
+    return SchemeGroupVersion.WithResource(resource).GroupResource()
+}
+#+END_SRC
+
++ hack/tools.go
+
+#+BEGIN_SRC go 
+// +build tools
+
+/*
+Copyright 2019 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// This package imports things required by build scripts, to force `go mod` to see them as dependencies
+package tools
+
+import _ "k8s.io/code-generator"
+#+END_SRC
+
+=tools.go= 主要为了引入 =k8s.io/code-generator= 依赖。
+
++ hack/update-codegen.sh
+
+#+BEGIN_SRC bash 
+#!/usr/bin/env bash
+
+# Copyright 2017 The Kubernetes Authors.                                                                                       #                                                                                                                              # Licensed under the Apache License, Version 2.0 (the "License");                                                              # you may not use this file except in compliance with the License.                                                             # You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+SCRIPT_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
+CODEGEN_PKG=${CODEGEN_PKG:-$(cd "${SCRIPT_ROOT}"; ls -d -1 ./vendor/k8s.io/code-generator 2>/dev/null || echo ../code-generator)}
+
+# generate the code with:
+# --output-base    because this script should also be able to run inside the vendor dir of
+#                  k8s.io/kubernetes. The output-base is needed for the generators to output into the vendor dir
+#                  instead of the $GOPATH directly. For normal projects this can be dropped.
+bash "${CODEGEN_PKG}"/generate-groups.sh "client,informer,lister" \
+  github.com/opskumu/crd-example/generated github.com/opskumu/crd-example/apis \
+  test:v1 \
+  --output-base "$(dirname "${BASH_SOURCE[0]}")/../../../.." \
+  --go-header-file "${SCRIPT_ROOT}"/hack/boilerplate.go.txt
+
+# To use your own boilerplate text append:
+#   --go-header-file "${SCRIPT_ROOT}"/hack/custom-boilerplate.go.txt
+#+END_SRC
+
+以上代码可以参考 sample-controller [[https://github.com/kubernetes/sample-controller/blob/master/pkg/apis/samplecontroller/v1alpha1/doc.go][doc.go]]/[[https://github.com/kubernetes/sample-controller/blob/master/pkg/apis/samplecontroller/v1alpha1/register.go][register.go]]/[[https://github.com/kubernetes/sample-controller/blob/master/hack/tools.go][tools.go]]/[[https://github.com/kubernetes/sample-controller/blob/master/hack/update-codegen.sh][update-codegen.sh]] 内容，本文中 CRD 是 kubebuilder 生成的，因此内容稍有不同。
+
+创建完成以上文件之后，执行以下命令生成代码：
+
+#+BEGIN_SRC bash 
+# K8SVERSION=v0.19.6                              // 注意此处版本以下几个包要一致，否则可能出现不兼容的情况
+# go get -v k8s.io/code-generator@${K8SVERSION}
+# go get -v k8s.io/client-go@${K8SVERSION}
+# go get -v k8s.io/apimachinery@${K8SVERSION}
+# go mod vendor
+#+END_SRC
+
+把相关依赖包放入 vendor 中，以便 =hack/update-codegen.sh= 可以调用 =code-generator= 中的脚本。完成之后，执行生成代码指令：
+
+#+BEGIN_SRC bash 
+# bash hack/update-codegen.sh
+Generating clientset for test:v1 at github.com/opskumu/crd-example/generated/clientset
+Generating listers for test:v1 at github.com/opskumu/crd-example/generated/listers
+Generating informers for test:v1 at github.com/opskumu/crd-example/generated/informers
+# crd-example tree -L 1 generated
+generated
+├── clientset
+├── informers
+└── listers
+#+END_SRC
+
+至此完成了添加 ConfigMapHistory CRD 和相关 client 代码的所有操作，如果需要生成其它 Kind 类型的重复以上操作即可（以上创建的文件不需要重复创建）。
+
+** 创建 CRD
+
+#+BEGIN_SRC bash
+kubectl create -f config/crd/bases/test.opskumu.com_configmaphistories.yaml
+#+END_SRC
+
+创建测试资源
+
+#+BEGIN_SRC bash 
+# cat test.yaml
+apiVersion: "test.opskumu.com/v1"
+kind: ConfigMapHistory
+metadata:
+  name: test
+configMap: "test"
+data:
+  test: test
+# kubectl create -f ./test.yaml
+configmaphistory.test.opskumu.com/test created
+# kubectl get configmaphistory.test.opskumu.com
+NAME   AGE
+test   27s
+#+END_SRC
+
+** 参考文档
+
++ [[https://github.com/kubernetes/sample-controller][sample-controller]]
++ [[https://insujang.github.io/2020-02-13/programming-kubernetes-crd/#1-generating-go-code-with-code-generator][Programming Kubernetes CRDs]]
++ [[https://chanjarster.github.io/post/k8s/mix-kubebuilder-and-code-generator/][混合kubebuilder与code generator编写CRD]]
